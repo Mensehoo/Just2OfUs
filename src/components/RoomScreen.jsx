@@ -167,6 +167,13 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
     };
   }, [roomCode]);
 
+  // Bind local and remote video elements once established and rendered
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, connectionStatus]);
+
   // Bind video element to remoteStream once it is established
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
