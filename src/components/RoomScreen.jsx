@@ -28,6 +28,11 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [peerScreenSharing, setPeerScreenSharing] = useState(false);
   const screenTrackRef = useRef(null);
+  const screenAudioTrackRef = useRef(null);
+  const audioMixerCtxRef = useRef(null);
+  const micSourceRef = useRef(null);
+  const screenSourceRef = useRef(null);
+  const mixedDestRef = useRef(null);
 
   // Chat States
   const [messages, setMessages] = useState([]);
@@ -289,9 +294,47 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
     if (!isScreenSharing) {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: true,
+          audio: true // Request tab/system audio track
+        });
         const screenTrack = screenStream.getVideoTracks()[0];
         screenTrackRef.current = screenTrack;
+
+        // Check if there is an audio track in the screen share
+        const screenAudioTrack = screenStream.getAudioTracks()[0];
+        
+        if (screenAudioTrack && localStream && localStream.getAudioTracks()[0]) {
+          screenAudioTrackRef.current = screenAudioTrack;
+          try {
+            // Set up Web Audio API to mix microphone and screen audio
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContext();
+            audioMixerCtxRef.current = audioCtx;
+
+            const mixedDest = audioCtx.createMediaStreamDestination();
+            mixedDestRef.current = mixedDest;
+
+            // Connect local mic (respects mute state automatically)
+            const micSource = audioCtx.createMediaStreamSource(new MediaStream([localStream.getAudioTracks()[0]]));
+            micSourceRef.current = micSource;
+            micSource.connect(mixedDest);
+
+            // Connect screen audio source
+            const screenSource = audioCtx.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+            screenSourceRef.current = screenSource;
+            screenSource.connect(mixedDest);
+
+            // Replace WebRTC audio track with mixed track
+            const senders = callConnection.peerConnection.getSenders();
+            const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
+            if (audioSender) {
+              audioSender.replaceTrack(mixedDest.stream.getAudioTracks()[0]);
+            }
+          } catch (audioErr) {
+            console.warn("Failed to mix screen share audio, proceeding with video only:", audioErr);
+          }
+        }
 
         // Find the sender that transmits video tracks
         const senders = callConnection.peerConnection.getSenders();
@@ -325,19 +368,56 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   };
 
   const stopLocalScreenSharing = () => {
+    // 1. Stop screen video track
     if (screenTrackRef.current) {
       screenTrackRef.current.stop();
       screenTrackRef.current = null;
     }
 
-    if (callConnection && callConnection.peerConnection && localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
-      const senders = callConnection.peerConnection.getSenders();
-      const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+    // 2. Stop screen audio track
+    if (screenAudioTrackRef.current) {
+      screenAudioTrackRef.current.stop();
+      screenAudioTrackRef.current = null;
+    }
 
-      if (videoSender && videoTrack) {
-        videoSender.replaceTrack(videoTrack);
+    // 3. Restore microphone and camera tracks and clean up Web Audio nodes
+    if (callConnection && callConnection.peerConnection) {
+      const senders = callConnection.peerConnection.getSenders();
+      
+      // Restore original camera track
+      if (localStream) {
+        const videoTrack = localStream.getVideoTracks()[0];
+        const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+        if (videoSender && videoTrack) {
+          videoSender.replaceTrack(videoTrack);
+        }
       }
+
+      // Restore original microphone track (if it was replaced by mixed audio)
+      if (localStream) {
+        const audioTrack = localStream.getAudioTracks()[0];
+        const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
+        if (audioSender && audioTrack) {
+          audioSender.replaceTrack(audioTrack);
+        }
+      }
+    }
+
+    // Disconnect Web Audio API nodes
+    if (micSourceRef.current) {
+      micSourceRef.current.disconnect();
+      micSourceRef.current = null;
+    }
+    if (screenSourceRef.current) {
+      screenSourceRef.current.disconnect();
+      screenSourceRef.current = null;
+    }
+    if (mixedDestRef.current) {
+      mixedDestRef.current = null;
+    }
+    if (audioMixerCtxRef.current) {
+      audioMixerCtxRef.current.close();
+      audioMixerCtxRef.current = null;
     }
 
     setIsScreenSharing(false);
