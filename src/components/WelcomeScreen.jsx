@@ -53,7 +53,7 @@ export default function WelcomeScreen({ onRoomSelect, defaultRoomCode }) {
             <Heart size={48} color="var(--color-primary)" fill="var(--color-primary)" style={styles.logoIcon} />
           </div>
           <h1 style={styles.title}>Just2OfUs</h1>
-          <p style={styles.subtitle}>Your private, cozy space to meet and chat 💙</p>
+          <p style={styles.subtitle}>Our private, cozy space to meet and chat 💙</p>
         </div>
 
         <div style={styles.actions}>
