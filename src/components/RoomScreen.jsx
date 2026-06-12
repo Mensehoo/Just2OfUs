@@ -45,6 +45,14 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
   // Copy Link State
   const [copied, setCopied] = useState(false);
+  const [canShareScreen, setCanShareScreen] = useState(false);
+
+  // Check screen sharing support (false on mobile Chrome/Firefox)
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
+      setCanShareScreen(true);
+    }
+  }, []);
 
   // Refs for Video Elements
   const localVideoRef = useRef(null);
@@ -740,13 +748,15 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
           {connectionStatus === 'connected' && (
             <>
-              <button 
-                onClick={toggleScreenShare} 
-                className={`control-icon-btn ${isScreenSharing ? 'active' : ''}`}
-                title={isScreenSharing ? "Stop Sharing Screen" : "Share Screen"}
-              >
-                {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-              </button>
+              {canShareScreen && (
+                <button 
+                  onClick={toggleScreenShare} 
+                  className={`control-icon-btn ${isScreenSharing ? 'active' : ''}`}
+                  title={isScreenSharing ? "Stop Sharing Screen" : "Share Screen"}
+                >
+                  {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+                </button>
+              )}
 
               <button 
                 onClick={sendHeart} 
