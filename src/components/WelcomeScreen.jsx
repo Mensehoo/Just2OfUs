@@ -100,7 +100,7 @@ export default function WelcomeScreen({ onRoomSelect, defaultRoomCode }) {
       </div>
       
       <div style={styles.footer}>
-        Made with 💙 for your favorite person
+        Made with 💙 for Yudarthvader
       </div>
     </div>
   );
