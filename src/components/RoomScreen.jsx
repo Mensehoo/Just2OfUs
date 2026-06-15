@@ -13,10 +13,24 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   const [peer, setPeer] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
-  const [dataConnection, setDataConnection] = useState(null);
-  const [callConnection, setCallConnection] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState('connecting'); // connecting, waiting, connected, disconnected
+  const [dataConnection, setDataConnectionState] = useState(null);
+  const [callConnection, setCallConnectionState] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('connecting'); // connecting, waiting, connected, disconnected, room-full
   
+  // Refs for tracking connections synchronously in event listeners
+  const dataConnRef = useRef(null);
+  const callConnRef = useRef(null);
+
+  const setDataConnection = (conn) => {
+    dataConnRef.current = conn;
+    setDataConnectionState(conn);
+  };
+
+  const setCallConnection = (call) => {
+    callConnRef.current = call;
+    setCallConnectionState(call);
+  };
+
   // Device States
   const [localMic, setLocalMic] = useState(initialMic);
   const [localCamera, setLocalCamera] = useState(initialCamera);
@@ -47,12 +61,45 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   const [copied, setCopied] = useState(false);
   const [canShareScreen, setCanShareScreen] = useState(false);
 
+  // Meeting Duration Timer State
+  const [callDuration, setCallDuration] = useState(0);
+
   // Check screen sharing support (false on mobile Chrome/Firefox)
   useEffect(() => {
     if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
       setCanShareScreen(true);
     }
   }, []);
+
+  // Meeting Duration Timer Effect
+  useEffect(() => {
+    let interval = null;
+    if (connectionStatus === 'connected') {
+      interval = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    } else {
+      setCallDuration(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [connectionStatus]);
+
+  const formatTime = (secs) => {
+    const hrs = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const remainingSecs = secs % 60;
+    
+    const parts = [];
+    if (hrs > 0) {
+      parts.push(hrs.toString().padStart(2, '0'));
+    }
+    parts.push(mins.toString().padStart(2, '0'));
+    parts.push(remainingSecs.toString().padStart(2, '0'));
+    
+    return parts.join(':');
+  };
 
   // Refs for Video Elements
   const localVideoRef = useRef(null);
@@ -80,13 +127,27 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(err => {
+            console.warn("Failed to auto-play local video:", err);
+          });
         }
+
+        const peerConfig = {
+          debug: 1,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:stun3.l.google.com:19302' },
+              { urls: 'stun:stun4.l.google.com:19302' }
+            ]
+          }
+        };
 
         // Initialize PeerJS
         // Peer A tries to register as 'roomCode' (acts as Host)
-        const peerInstance = new Peer(roomCode, {
-          debug: 1, // Only errors
-        });
+        const peerInstance = new Peer(roomCode, peerConfig);
         activePeer = peerInstance;
         setPeer(peerInstance);
 
@@ -96,6 +157,11 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
           
           // Wait for incoming connections
           peerInstance.on('call', (incomingCall) => {
+            if (callConnRef.current) {
+              console.log('Rejecting incoming call: Room is full');
+              incomingCall.close();
+              return;
+            }
             incomingCall.answer(stream);
             setCallConnection(incomingCall);
             
@@ -107,6 +173,14 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
           });
 
           peerInstance.on('connection', (conn) => {
+            if (dataConnRef.current && dataConnRef.current.open) {
+              console.log('Rejecting incoming connection: Room is full');
+              conn.on('open', () => {
+                conn.send({ type: 'room-full' });
+                setTimeout(() => conn.close(), 1000);
+              });
+              return;
+            }
             setDataConnection(conn);
             setupDataListeners(conn);
           });
@@ -118,9 +192,7 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
             console.log('Room ID taken, registering as Guest...');
             
             // Re-create Peer with a random ID (guest role)
-            const guestPeer = new Peer({
-              debug: 1
-            });
+            const guestPeer = new Peer(peerConfig);
             activePeer = guestPeer;
             setPeer(guestPeer);
 
@@ -142,7 +214,17 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
               call.on('error', (cErr) => {
                 console.error("Call error:", cErr);
-                setConnectionStatus('disconnected');
+                setConnectionStatus(currentStatus => {
+                  if (currentStatus === 'room-full') return 'room-full';
+                  return 'disconnected';
+                });
+              });
+
+              call.on('close', () => {
+                setConnectionStatus(currentStatus => {
+                  if (currentStatus === 'room-full') return 'room-full';
+                  return 'disconnected';
+                });
               });
 
               // Establish Data Connection
@@ -154,7 +236,10 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
             });
           } else {
             console.error('PeerJS error:', err);
-            setConnectionStatus('disconnected');
+            setConnectionStatus(currentStatus => {
+              if (currentStatus === 'room-full') return 'room-full';
+              return 'disconnected';
+            });
           }
         });
 
@@ -184,6 +269,9 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(err => {
+        console.warn("Failed to auto-play local video in binding hook:", err);
+      });
     }
   }, [localStream, connectionStatus]);
 
@@ -191,6 +279,9 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
+      remoteVideoRef.current.play().catch(err => {
+        console.warn("Failed to auto-play remote video in binding hook:", err);
+      });
     }
   }, [remoteStream, connectionStatus]);
 
@@ -210,7 +301,7 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
   // 2. Set up event listeners for the Peer data channel (chat, sync state, hearts)
   const setupDataListeners = (conn) => {
-    conn.on('open', () => {
+    const handleOpen = () => {
       console.log('Data connection established!');
       
       // Exchange initial handshake names & device states
@@ -221,49 +312,62 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
         cameraEnabled: localCamera,
         screenSharing: isScreenSharing
       });
+    };
 
-      conn.on('data', (data) => {
-        if (!data || !data.type) return;
+    if (conn.open) {
+      handleOpen();
+    } else {
+      conn.on('open', handleOpen);
+    }
 
-        switch (data.type) {
-          case 'handshake':
-            setPeerName(data.name);
-            setPeerMic(data.micEnabled);
-            setPeerCamera(data.cameraEnabled);
-            setPeerScreenSharing(data.screenSharing || false);
-            break;
-          case 'state-change':
-            if (data.device === 'mic') setPeerMic(data.enabled);
-            if (data.device === 'camera') setPeerCamera(data.enabled);
-            break;
-          case 'screen-share':
-            setPeerScreenSharing(data.sharing);
-            break;
-          case 'chat':
-            setMessages(prev => [
-              ...prev, 
-              { sender: 'peer', text: data.text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
-            ]);
-            if (!chatOpen) {
-              setUnreadCount(prev => prev + 1);
-            }
-            break;
-          case 'heart':
-            triggerHeartAnimation();
-            break;
-          default:
-            break;
-        }
-      });
+    conn.on('data', (data) => {
+      if (!data || !data.type) return;
 
-      conn.on('close', () => {
-        console.log('Partner disconnected.');
-        setConnectionStatus('waiting');
-        setRemoteStream(null);
-        setCallConnection(null);
-        setPeerScreenSharing(false);
-        playLeaveSound();
-      });
+      switch (data.type) {
+        case 'room-full':
+          setConnectionStatus('room-full');
+          if (peer) {
+            peer.destroy();
+          }
+          break;
+        case 'handshake':
+          setPeerName(data.name);
+          setPeerMic(data.micEnabled);
+          setPeerCamera(data.cameraEnabled);
+          setPeerScreenSharing(data.screenSharing || false);
+          break;
+        case 'state-change':
+          if (data.device === 'mic') setPeerMic(data.enabled);
+          if (data.device === 'camera') setPeerCamera(data.enabled);
+          break;
+        case 'screen-share':
+          setPeerScreenSharing(data.sharing);
+          break;
+        case 'chat':
+          setMessages(prev => [
+            ...prev, 
+            { sender: 'peer', text: data.text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+          ]);
+          if (!chatOpen) {
+            setUnreadCount(prev => prev + 1);
+          }
+          break;
+        case 'heart':
+          triggerHeartAnimation();
+          break;
+        default:
+          break;
+      }
+    });
+
+    conn.on('close', () => {
+      console.log('Partner disconnected.');
+      setConnectionStatus('waiting');
+      setRemoteStream(null);
+      setCallConnection(null);
+      setDataConnection(null);
+      setPeerScreenSharing(false);
+      playLeaveSound();
     });
   };
 
@@ -360,6 +464,9 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
         // Show local screen share preview
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream;
+          localVideoRef.current.play().catch(err => {
+            console.warn("Failed to auto-play screen share local stream:", err);
+          });
         }
 
         // Listen for when browser's built-in "Stop Sharing" button is clicked
@@ -376,19 +483,15 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
   };
 
   const stopLocalScreenSharing = () => {
-    // 1. Stop screen video track
-    if (screenTrackRef.current) {
-      screenTrackRef.current.stop();
-      screenTrackRef.current = null;
-    }
+    // Keep local references of tracks to stop them later
+    const screenTrack = screenTrackRef.current;
+    const screenAudioTrack = screenAudioTrackRef.current;
 
-    // 2. Stop screen audio track
-    if (screenAudioTrackRef.current) {
-      screenAudioTrackRef.current.stop();
-      screenAudioTrackRef.current = null;
-    }
+    // Clear the refs immediately to prevent recursive calls
+    screenTrackRef.current = null;
+    screenAudioTrackRef.current = null;
 
-    // 3. Restore microphone and camera tracks and clean up Web Audio nodes
+    // 1. Restore microphone and camera tracks first while they are still active
     if (callConnection && callConnection.peerConnection) {
       const senders = callConnection.peerConnection.getSenders();
       
@@ -411,6 +514,16 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
       }
     }
 
+    // 2. Now it is safe to stop the screen tracks
+    if (screenTrack) {
+      // Remove onended listener to avoid loop
+      screenTrack.onended = null;
+      screenTrack.stop();
+    }
+    if (screenAudioTrack) {
+      screenAudioTrack.stop();
+    }
+
     // Disconnect Web Audio API nodes
     if (micSourceRef.current) {
       micSourceRef.current.disconnect();
@@ -424,7 +537,7 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
       mixedDestRef.current = null;
     }
     if (audioMixerCtxRef.current) {
-      audioMixerCtxRef.current.close();
+      audioMixerCtxRef.current.close().catch(() => {});
       audioMixerCtxRef.current = null;
     }
 
@@ -436,6 +549,9 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
     // Restore local camera preview
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(err => {
+        console.warn("Failed to auto-play local video after screen share:", err);
+      });
     }
   };
 
@@ -605,6 +721,19 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
 
   return (
     <div className="meeting-container">
+      {/* Meeting Duration Timer Header */}
+      {connectionStatus === 'connected' && (
+        <div className="meeting-header">
+          <div className="status-indicator">
+            <span className="pulse-dot" />
+            <span>Cozy Meet</span>
+          </div>
+          <div className="timer-badge">
+            <span>{formatTime(callDuration)}</span>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification for Copied Link */}
       {copied && (
         <div className="cute-toast">
@@ -668,6 +797,17 @@ export default function RoomScreen({ roomCode, joinDetails, onLeave }) {
             <div className="cute-avatar" style={{ background: 'var(--color-danger)' }}>🥀</div>
             <h2 style={styles.stateTitle}>Call Disconnected</h2>
             <p style={styles.stateDesc}>Connection was closed or lost. Please try rejoining 💙</p>
+            <button onClick={hangUp} className="cute-btn cute-btn-primary" style={{ marginTop: '1rem' }}>
+              Back to Home
+            </button>
+          </div>
+        )}
+
+        {connectionStatus === 'room-full' && (
+          <div style={styles.centeredState}>
+            <div className="cute-avatar" style={{ background: 'var(--color-danger)' }}>🥀</div>
+            <h2 style={styles.stateTitle}>Room is Full</h2>
+            <p style={styles.stateDesc}>This cozy space is already occupied by 2 people. Only 2 people are allowed! 💙</p>
             <button onClick={hangUp} className="cute-btn cute-btn-primary" style={{ marginTop: '1rem' }}>
               Back to Home
             </button>
